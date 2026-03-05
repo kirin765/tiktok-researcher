@@ -34,6 +34,11 @@ def prepare_db():
 class _FakeApifyResponse:
     def __init__(self, data: dict):
         self._data = data
+        self.status_code = 200
+
+    @property
+    def ok(self) -> bool:
+        return True
 
     def raise_for_status(self) -> None:
         return None
@@ -44,12 +49,44 @@ class _FakeApifyResponse:
 
 @pytest.fixture(autouse=True)
 def mock_apify_requests(monkeypatch):
-    def fake_post(url: str, *_, **__):
+    def fake_post(url: str, *args, json=None, **kwargs):
+        del args
+        del kwargs
+        payload = json if isinstance(json, dict) else None
+        if not payload:
+            payload = None
+
+        post_urls = None
+        if isinstance(payload, dict):
+            post_urls = payload.get("postURLs")
+
+        vid = "123456"
+        if isinstance(post_urls, list) and post_urls:
+            url = str(post_urls[0])
+            if "/video/" in url:
+                vid = url.split("/video/")[-1].split("?")[0]
+        elif isinstance(payload, dict):
+            token = (
+                payload.get("searchTerms")
+                or payload.get("searchKeyword")
+                or payload.get("searchQueries")
+                or payload.get("query")
+                or payload.get("creatorId")
+                or payload.get("profiles")
+            )
+            if token:
+                if isinstance(token, (list, tuple)):
+                    token = token[0] if token else None
+                raw = str(token).strip()
+                if raw:
+                    vid = str(abs(hash(raw)) % 900000 + 100000)
+
         return _FakeApifyResponse(
             {
                 "items": [
                     {
-                        "id": "123456",
+                        "id": vid,
+                        "webVideoUrl": f"https://www.tiktok.com/@mock/video/{vid}",
                         "playCount": 1234,
                         "stats": {
                             "playCount": 1234,

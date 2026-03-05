@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+import traceback
 
 from sqlalchemy import select
 
@@ -11,6 +12,7 @@ from app.db.session import get_db
 from app.settings import get_settings
 from app.worker.tasks import task_fetch_metrics_snapshot_with_task
 from app.worker.queue import enqueue
+from app.worker.tasks import _log
 
 
 def run_once() -> int:
@@ -31,13 +33,41 @@ def run_once() -> int:
         )
 
         for row in rows:
-            job = Job(type="snapshot", status="queued", video_id=row.video_id)
-            db.add(job)
-            db.flush()
-            row.status = "enqueued"
-            row.updated_at = now
-            enqueue(task_fetch_metrics_snapshot_with_task, str(row.video_id), provider, None, str(row.id), str(job.id))
-            enqueued += 1
+            job = None
+            try:
+                job = Job(type="snapshot", status="queued", video_id=row.video_id)
+                db.add(job)
+                db.flush()
+                row.status = "enqueued"
+                row.updated_at = now
+                db.commit()
+                _log(
+                    db,
+                    job.id,
+                    "info",
+                    "snapshot task dequeued",
+                    {"scheduled_task_id": str(row.id), "provider": provider, "video_id": str(row.video_id)},
+                )
+                enqueue(task_fetch_metrics_snapshot_with_task, str(row.video_id), provider, None, str(row.id), str(job.id))
+                _log(
+                    db,
+                    job.id,
+                    "info",
+                    "snapshot task enqueued",
+                    {"scheduled_task_id": str(row.id), "provider": provider, "video_id": str(row.video_id)},
+                )
+                enqueued += 1
+            except Exception as exc:  # noqa: BLE001
+                if job is not None:
+                    db.add(job)
+                    job.status = "failed"
+                    job.error = f"{type(exc).__name__}: {exc}"
+                    _log(db, job.id, "error", f"{type(exc).__name__}: {exc}", {"trace": traceback.format_exc(), "scheduled_task_id": str(row.id)})
+                row.status = "pending"
+                row.last_error = f"{type(exc).__name__}: {exc}"
+                row.updated_at = datetime.now(tz=timezone.utc)
+                db.add(row)
+                db.commit()
 
     return enqueued
 

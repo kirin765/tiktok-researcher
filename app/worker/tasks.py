@@ -57,6 +57,234 @@ def _fmt_job_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _safe_parse_discovered_payload(raw: object) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _apply_discovered_metadata(video: Video, payload: dict[str, Any]) -> None:
+    published_at = payload.get("published_at")
+    if published_at is not None and video.published_at is None:
+        video.published_at = published_at
+    duration_sec = payload.get("duration_sec")
+    if duration_sec is not None and video.duration_sec is None:
+        video.duration_sec = duration_sec
+    caption_keywords = payload.get("caption_keywords")
+    if caption_keywords is not None and not video.caption_keywords:
+        video.caption_keywords = caption_keywords
+    hashtags = payload.get("hashtags")
+    if hashtags is not None and not video.hashtags:
+        video.hashtags = hashtags
+    author_id = payload.get("author_id")
+    if author_id is not None and video.author_id is None:
+        video.author_id = author_id
+    author_handle = payload.get("author_handle")
+    if author_handle is not None and video.author_handle is None:
+        video.author_handle = author_handle
+    sound_id = payload.get("sound_id")
+    if sound_id is not None and video.sound_id is None:
+        video.sound_id = sound_id
+    sound_title = payload.get("sound_title")
+    if sound_title is not None and video.sound_title is None:
+        video.sound_title = sound_title
+    sound_is_original = payload.get("sound_is_original")
+    if sound_is_original is not None and video.sound_is_original is None:
+        video.sound_is_original = sound_is_original
+    width = payload.get("width")
+    if width is not None and video.width is None:
+        video.width = width
+    height = payload.get("height")
+    if height is not None and video.height is None:
+        video.height = height
+    has_audio = payload.get("has_audio")
+    if has_audio is not None and video.has_audio is None:
+        video.has_audio = has_audio
+
+
+def task_discover_videos(
+    provider_name: str,
+    query: str | None = None,
+    creator_handle: str | None = None,
+    hashtag: str | None = None,
+    challenge: str | None = None,
+    region: str | None = "KR",
+    language: str | None = "ko",
+    sort: str | None = None,
+    time_window_start: str | None = None,
+    time_window_end: str | None = None,
+    max_results: int = 120,
+    cursor: str | None = None,
+    job_id: str | None = None,
+) -> tuple[int, int, int, int, list[str], str | None]:
+    with get_db() as db:
+        job: Job | None = None
+        if job_id is not None:
+            try:
+                job = db.get(Job, _safe_uuid(job_id, "job_id"))
+            except ValueError:
+                job = None
+        if job is not None:
+            job.status = "running"
+
+        try:
+            prov = _provider(provider_name)
+            if job is not None:
+                _log(
+                    db,
+                    job.id,
+                    "info",
+                    "video discovery started",
+                    {"provider": provider_name, "query": query, "creator_handle": creator_handle, "hashtag": hashtag, "challenge": challenge, "max_results": max_results},
+                )
+            (
+                discovered_count,
+                imported_count,
+                skipped_count,
+                scheduled_count,
+                imported_video_ids,
+            ), discovered_cursor = _discover_videos(
+                db,
+                prov=prov,
+                provider_name=provider_name,
+                query=query,
+                creator_handle=creator_handle,
+                hashtag=hashtag,
+                challenge=challenge,
+                region=region,
+                language=language,
+                sort=sort,
+                time_window_start=time_window_start,
+                time_window_end=time_window_end,
+                max_results=max_results,
+                cursor=cursor,
+            )
+            if job is not None:
+                job.status = "done"
+                job.progress = 100
+                _log(
+                    db,
+                    job.id,
+                    "info",
+                    "video discovery done",
+                    {"provider": provider_name, "count": discovered_count, "next_cursor": discovered_cursor},
+                )
+            return discovered_count, imported_count, skipped_count, scheduled_count, imported_video_ids, discovered_cursor
+        except ProviderDisabledError as exc:
+            detail = _fmt_job_error(exc)
+            if job is not None:
+                job.status = "failed"
+                job.error = detail
+                _log(db, job.id, "error", detail)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            detail = _fmt_job_error(exc)
+            if job is not None:
+                job.status = "failed"
+                job.error = detail
+                _log(
+                    db,
+                    job.id,
+                    "error",
+                    detail,
+                    {"trace": traceback.format_exc(), "provider": provider_name},
+                )
+            raise
+
+
+def discover_videos_sync(
+    db,
+    prov: BaseProvider,
+    provider_name: str,
+    query: str | None = None,
+    creator_handle: str | None = None,
+    hashtag: str | None = None,
+    challenge: str | None = None,
+    region: str | None = None,
+    language: str | None = None,
+    sort: str | None = None,
+    time_window_start: str | None = None,
+    time_window_end: str | None = None,
+    max_results: int = 120,
+    cursor: str | None = None,
+) -> tuple[tuple[int, int, int, int, list[str]], str | None]:
+    return _discover_videos(
+        db,
+        prov=prov,
+        provider_name=provider_name,
+        query=query,
+        creator_handle=creator_handle,
+        hashtag=hashtag,
+        challenge=challenge,
+        region=region,
+        language=language,
+        sort=sort,
+        time_window_start=time_window_start,
+        time_window_end=time_window_end,
+        max_results=max_results,
+        cursor=cursor,
+    )
+
+
+def _discover_videos(
+    db,
+    prov: BaseProvider,
+    provider_name: str,
+    query: str | None = None,
+    creator_handle: str | None = None,
+    hashtag: str | None = None,
+    challenge: str | None = None,
+    region: str | None = None,
+    language: str | None = None,
+    sort: str | None = None,
+    time_window_start: str | None = None,
+    time_window_end: str | None = None,
+    max_results: int = 120,
+    cursor: str | None = None,
+) -> tuple[tuple[int, int, int, int, list[str]], str | None]:
+    if max_results <= 0:
+        return (0, 0, 0, 0, []), cursor
+
+    discovered, next_cursor = prov.discover_videos(
+        db,
+        query=query,
+        creator_handle=creator_handle,
+        hashtag=hashtag,
+        challenge=challenge,
+        region=region,
+        language=language,
+        sort=sort,
+        time_window_start=time_window_start,
+        time_window_end=time_window_end,
+        max_results=max_results,
+        cursor=cursor,
+    )
+    discovered_count = len(discovered)
+    imported = 0
+    skipped = 0
+    scheduled = 0
+    imported_video_ids: list[str] = []
+    for item in discovered:
+        payload = _safe_parse_discovered_payload(item)
+        if not payload:
+            skipped += 1
+            continue
+        url = payload.get("url")
+        if not isinstance(url, str) or not url.strip():
+            skipped += 1
+            continue
+
+        video = prov.upsert_video_from_url(db, url.strip(), region=region, language=language)
+        imported += 1
+        imported_video_ids.append(str(video.id))
+        _apply_discovered_metadata(video, payload)
+        scheduled += schedule_snapshot_tasks(db, video)
+
+    return (discovered_count, imported, skipped, scheduled, imported_video_ids), next_cursor
+
+
 def upsert_snapshot(
     db,
     video: Video,
@@ -264,12 +492,33 @@ def _fetch_metrics_snapshot_impl(
 ) -> str | None:
     with get_db() as db:
         job: Job | None = None
+        video_uuid: uuid.UUID | None = None
         scheduled = _get_scheduled_task(db, scheduled_task_id) if scheduled_task_id else None
         try:
             video_uuid = _safe_uuid(video_id, "video_id")
             job = _resolve_snapshot_job(db, job_id=job_id, video_id=video_uuid)
+            if job is None and scheduled is not None:
+                job = db.execute(
+                    select(Job)
+                    .where(Job.type == "snapshot")
+                    .where(Job.video_id == scheduled.video_id)
+                    .where(Job.status.in_(["queued", "running"]))
+                    .order_by(Job.created_at.desc())
+                ).scalar_one_or_none()
+            if job is None:
+                fallback_job = Job(type="snapshot", status="running", video_id=video_uuid)
+                db.add(fallback_job)
+                db.flush()
+                job = fallback_job
             if job is not None:
                 job.status = "running"
+                _log(
+                    db,
+                    job.id,
+                    "info",
+                    "snapshot fetch started",
+                    {"provider": provider_name, "scheduled_task_id": str(scheduled.id) if scheduled is not None else None, "video_id": str(video_uuid)},
+                )
 
             vid = db.get(Video, video_uuid)
             if not vid:
@@ -309,16 +558,31 @@ def _fetch_metrics_snapshot_impl(
             return str(vid.id)
         except Exception as exc:  # noqa: BLE001
             detail = _fmt_job_error(exc)
-            if job is not None:
-                job.status = "failed"
-                job.error = detail
-                _log(
-                    db,
-                    job.id,
-                    "error",
-                    detail,
-                    {"trace": traceback.format_exc(), "provider": provider_name},
-                )
+            error_job = job
+            if error_job is None and scheduled is not None:
+                error_job = db.execute(
+                    select(Job)
+                    .where(Job.type == "snapshot")
+                    .where(Job.video_id == scheduled.video_id)
+                    .where(Job.status.in_(["queued", "running"]))
+                    .order_by(Job.created_at.desc())
+                ).scalar_one_or_none()
+            if error_job is None:
+                fallback_video_id = video_uuid or (scheduled.video_id if scheduled else None)
+                fallback_job = Job(type="snapshot", status="failed", video_id=fallback_video_id, error=detail)
+                db.add(fallback_job)
+                db.flush()
+                error_job = fallback_job
+            else:
+                error_job.status = "failed"
+                error_job.error = detail
+            _log(
+                db,
+                error_job.id,
+                "error",
+                detail,
+                {"trace": traceback.format_exc(), "provider": provider_name, "scheduled_task_id": str(scheduled.id) if scheduled else None},
+            )
             _finalize_scheduled_task(scheduled, success=False, error=detail)
             return None
 
@@ -334,6 +598,7 @@ def task_analyze_content(job_id: str, video_id: str) -> str | None:
         if job is None:
             return None
         job.status = "running"
+        _log(db, job.id, "info", "content analysis started", {"video_id": video_id})
         try:
             parsed_video_id = _safe_uuid(video_id, "video_id")
         except ValueError:
@@ -382,6 +647,7 @@ def task_compute_scores(window_days: int = 7, job_id: str | None = None) -> list
                 job = None
         if job is not None:
             job.status = "running"
+            _log(db, job.id, "info", "compute scores started", {"window_days": window_days})
 
         try:
             video_ids = db.execute(select(Video.id)).scalars().all()
@@ -410,6 +676,13 @@ def task_generate_brief(job_id: str, region: str, language: str, niche: str, win
         if job is None:
             return None
         job.status = "running"
+        _log(
+            db,
+            job.id,
+            "info",
+            "brief generation started",
+            {"region": region, "language": language, "niche": niche, "window_days": window_days},
+        )
         try:
             payload = build_brief_json(db, region=region, language=language, niche=niche, window_days=window_days)
             window = payload["meta"]["window"]

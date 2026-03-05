@@ -20,6 +20,7 @@ docker compose exec api alembic upgrade head
 - `GET /health`
 - `POST /seeds/import-csv`
 - `POST /seeds/add-url`
+- `POST /seeds/discover`
 - `GET /videos`
 - `GET /videos/{id}/snapshots`
 - `GET /videos/{id}/tokens`
@@ -39,7 +40,11 @@ docker compose exec api alembic upgrade head
 - `PROVIDER_DEFAULT=apify`
 - `APIFY_TOKEN=` (required for live apify fetch; tests use mock/stub response)
 - `APIFY_ACTOR_ID=clockworks/tiktok-scraper`
+- `APIFY_DISCOVERY_ACTOR_ID=` (optional; defaults to `APIFY_ACTOR_ID`)
 - `APIFY_ACTOR_TIMEOUT=120`
+- `APIFY_DISCOVERY_TIMEOUT=120`
+- `APIFY_MAX_CONCURRENT_REQUESTS=3`
+- `DISCOVERY_SYNC_MAX_RESULTS=120`
 - `ENABLE_CONTENT_ANALYSIS=false`
 - `BRIEF_WINDOW_DAYS=7`
 - `BRIEF_TOP_K=100`

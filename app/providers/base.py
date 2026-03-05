@@ -55,3 +55,21 @@ class BaseProvider(ABC):
 
     def fetch_snapshot(self, session: Session, video: Video, captured_at=None) -> MetricPayload:
         return self.fetch_metrics(session, video, captured_at=captured_at)
+
+    def discover_videos(
+        self,
+        session: Session,
+        query: str | None = None,
+        creator_handle: str | None = None,
+        hashtag: str | None = None,
+        challenge: str | None = None,
+        region: str | None = None,
+        language: str | None = None,
+        sort: str | None = None,
+        time_window_start: str | None = None,
+        time_window_end: str | None = None,
+        max_results: int = 100,
+        cursor: str | None = None,
+        **_kwargs: object,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        raise NotImplementedError(f"discovery is not implemented in provider '{self.name}'")

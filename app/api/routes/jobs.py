@@ -23,6 +23,7 @@ from app.worker.tasks import (
     task_compute_scores,
     task_fetch_metrics_snapshot,
     task_generate_brief,
+    _log,
 )
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -78,6 +79,13 @@ def fetch_snapshot(payload: FetchSnapshotRequest, db: Session = Depends(get_db_s
     db.add(job)
     db.flush()
     db.commit()
+    _log(
+        db,
+        job.id,
+        "info",
+        "snapshot job created",
+        {"provider": provider, "video_id": payload.video_id, "captured_at": str(captured_at) if captured_at else None},
+    )
     enqueue(task_fetch_metrics_snapshot, str(video_uuid), provider, captured_at, None, str(job.id))
     return JobCreateResponse(job_id=str(job.id))
 
@@ -89,6 +97,7 @@ def analyze_content(payload: AnalyzeContentRequest, db: Session = Depends(get_db
     db.add(job)
     db.flush()
     db.commit()
+    _log(db, job.id, "info", "analyze job created", {"video_id": payload.video_id})
     enqueue(task_analyze_content, str(job.id), str(video_uuid))
     return JobCreateResponse(job_id=str(job.id))
 
@@ -99,6 +108,13 @@ def generate_brief(payload: GenerateBriefRequest, db: Session = Depends(get_db_s
     db.add(job)
     db.flush()
     db.commit()
+    _log(
+        db,
+        job.id,
+        "info",
+        "brief job created",
+        {"region": payload.region, "language": payload.language, "niche": payload.niche, "window_days": payload.window_days},
+    )
     enqueue(
         task_generate_brief,
         str(job.id),
@@ -116,6 +132,13 @@ def compute_scores(payload: ComputeScoresRequest, db: Session = Depends(get_db_s
     db.add(job)
     db.flush()
     db.commit()
+    _log(
+        db,
+        job.id,
+        "info",
+        "compute scores job created",
+        {"window_days": payload.window_days},
+    )
     enqueue(task_compute_scores, payload.window_days, str(job.id))
     return JobCreateResponse(job_id=str(job.id))
 

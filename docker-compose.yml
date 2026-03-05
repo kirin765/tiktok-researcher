@@ -23,6 +23,7 @@ services:
       - .env
     environment:
       PYTHONPATH: /app
+      WORKER_SYNC: "false"
     volumes:
       - ./data:/data
     ports:
@@ -40,7 +41,7 @@ services:
     environment:
       PYTHONPATH: /app
       WORKER_SYNC: "false"
-    command: ["python", "-m", "rq", "worker", "viral-factory", "-u", "redis://redis:6379/0"]
+    command: ["sh", "-c", "rq worker viral-factory -u redis://redis:6379/0 & rq worker viral-factory -u redis://redis:6379/0 & rq worker viral-factory -u redis://redis:6379/0 & wait"]
     volumes:
       - ./data:/data
 
@@ -52,6 +53,8 @@ services:
       - postgres
     env_file:
       - .env
+    environment:
+      WORKER_SYNC: "false"
     command: ["python", "-m", "app.scheduler.scheduler_main"]
     volumes:
       - ./data:/data

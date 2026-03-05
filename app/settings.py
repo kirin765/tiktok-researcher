@@ -33,6 +33,10 @@ class Settings:
         self.apify_token = os.getenv("APIFY_TOKEN") or None
         self.apify_actor_id = os.getenv("APIFY_ACTOR_ID") or "clockworks/tiktok-scraper"
         self.apify_actor_timeout = int(os.getenv("APIFY_ACTOR_TIMEOUT", "120"))
+        self.apify_discovery_actor_id = os.getenv("APIFY_DISCOVERY_ACTOR_ID") or self.apify_actor_id
+        self.discovery_sync_max_results = int(os.getenv("DISCOVERY_SYNC_MAX_RESULTS", "120"))
+        self.apify_discovery_timeout = int(os.getenv("APIFY_DISCOVERY_TIMEOUT", str(self.apify_actor_timeout)))
+        self.apify_max_concurrent_requests = max(1, int(os.getenv("APIFY_MAX_CONCURRENT_REQUESTS", "3")))
 
         self.enable_content_analysis = _to_bool("ENABLE_CONTENT_ANALYSIS", False)
         self.enable_asr = _to_bool("ENABLE_ASR", False)
