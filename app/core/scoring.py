@@ -17,6 +17,12 @@ def _safe_ratio(n: int | None, d: int | None) -> float:
     return float(n or 0) / max(float(d or 0), 1.0)
 
 
+def _snapshot_has_metric(snapshot: MetricSnapshot) -> bool:
+    return any(
+        getattr(snapshot, field) is not None for field in ("view_count", "like_count", "comment_count", "share_count", "bookmark_count")
+    )
+
+
 def _nearest_after(snapshots: list[MetricSnapshot], target: datetime) -> MetricSnapshot | None:
     picked = None
     for snapshot in snapshots:
@@ -56,6 +62,10 @@ def compute_score_from_snapshots(snapshots: list[MetricSnapshot]) -> ScoreRow | 
         return None
 
     snapshots = sorted(snapshots, key=lambda s: s.captured_at)
+    snapshots = [snapshot for snapshot in snapshots if _snapshot_has_metric(snapshot)]
+    if not snapshots:
+        return None
+
     t0 = snapshots[0]
     target = t0.captured_at + timedelta(hours=24)
     t24 = _nearest_after(snapshots[1:], target) or snapshots[-1]

@@ -41,6 +41,9 @@ class CsvProvider(BaseProvider):
 
     def upsert_video_from_url(self, session: Session, url: str, region: str | None, language: str | None) -> Video:
         normalized = normalize_tiktok_url(url)
+        platform_video_id = extract_tiktok_video_id(normalized)
+        if platform_video_id is None:
+            raise ValueError(f"invalid tiktok video URL: {url}")
         existing = session.execute(select(Video).where(Video.url == normalized)).scalar_one_or_none()
         if existing:
             if region and not existing.region:
@@ -52,7 +55,7 @@ class CsvProvider(BaseProvider):
         vid = Video(
             platform="tiktok",
             url=normalized,
-            platform_video_id=extract_tiktok_video_id(normalized),
+            platform_video_id=platform_video_id,
             region=region,
             language=language,
             caption_keywords=[],
@@ -81,4 +84,3 @@ class CsvProvider(BaseProvider):
     def parse_csv(self, content: bytes) -> list[dict]:
         text = content.decode("utf-8-sig")
         return list(csv.DictReader(StringIO(text)))
-

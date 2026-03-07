@@ -113,7 +113,15 @@ def generate_brief(payload: GenerateBriefRequest, db: Session = Depends(get_db_s
         job.id,
         "info",
         "brief job created",
-        {"region": payload.region, "language": payload.language, "niche": payload.niche, "window_days": payload.window_days},
+        {
+            "region": payload.region,
+            "language": payload.language,
+            "niche": payload.niche,
+            "window_days": payload.window_days,
+            "analysis_level": payload.analysis_level,
+            "active_video_target": payload.active_video_target,
+            "analysis_min_final_score": payload.analysis_min_final_score,
+        },
     )
     enqueue(
         task_generate_brief,
@@ -122,6 +130,9 @@ def generate_brief(payload: GenerateBriefRequest, db: Session = Depends(get_db_s
         payload.language,
         payload.niche,
         payload.window_days,
+        payload.analysis_level,
+        payload.active_video_target,
+        payload.analysis_min_final_score,
     )
     return JobCreateResponse(job_id=str(job.id))
 
@@ -144,10 +155,17 @@ def compute_scores(payload: ComputeScoresRequest, db: Session = Depends(get_db_s
 
 
 @router.get("")
-def list_jobs(status: str | None = None, limit: int = 50, db: Session = Depends(get_db_session)):
+def list_jobs(
+    status: str | None = None,
+    type: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db_session),
+):
     q = select(Job).order_by(Job.created_at.desc()).limit(limit)
     if status:
         q = q.where(Job.status == status).order_by(Job.created_at.desc())
+    if type:
+        q = q.where(Job.type == type).order_by(Job.created_at.desc())
     rows = db.execute(q).scalars().all()
     return [
         {

@@ -10,6 +10,7 @@ from sqlalchemy import text
 os.environ.setdefault("DATABASE_URL", "sqlite:///./tests/test_db.sqlite")
 os.environ.setdefault("WORKER_SYNC", "true")
 os.environ.setdefault("APIFY_TOKEN", "test-token")
+os.environ.setdefault("EXPORT_DIR", "/tmp/tiktok-research-exports")
 
 from app.main import app  # noqa: E402
 from app.db.session import create_schema, get_db

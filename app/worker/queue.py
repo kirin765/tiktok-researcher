@@ -21,8 +21,8 @@ def enqueue(func, *args, **kwargs):
         from rq import Queue
 
         conn = Redis.from_url(settings.redis_url)
-        q = Queue("viral-factory", connection=conn)
-        return q.enqueue(func, args=args, kwargs=kwargs)
+        q = Queue("viral-factory", connection=conn, default_timeout=settings.rq_job_timeout)
+        return q.enqueue(func, args=args, kwargs=kwargs, job_timeout=settings.rq_job_timeout)
     except Exception:
         func(*args, **kwargs)
         return SyncResult(str(uuid.uuid4()))

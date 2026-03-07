@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas.seed_schemas import AddUrlRequest, ImportCsvResponse
 from app.api.schemas.seed_schemas import SeedDiscoverRequest, SeedDiscoverResponse
-from app.core.ids import normalize_tiktok_url
+from app.core.ids import extract_tiktok_video_id, normalize_tiktok_url
 from app.db.models import Video
 from app.db.session import get_db_session
 from app.providers.apify_provider import ApifyProvider
@@ -64,8 +64,12 @@ async def import_csv(
         if not url:
             skipped += 1
             continue
+        normalized_url = normalize_tiktok_url(url)
+        if not extract_tiktok_video_id(normalized_url):
+            skipped += 1
+            continue
         try:
-            video = prov.upsert_video_from_url(db, url, row.get("region"), row.get("language"))
+            video = prov.upsert_video_from_url(db, normalized_url, row.get("region"), row.get("language"))
         except Exception:
             skipped += 1
             continue
@@ -124,6 +128,8 @@ def add_url(payload: AddUrlRequest, db: Session = Depends(get_db_session)):
     provider_name = normalize_provider(payload.provider, default=get_settings().provider_default)
     _ = _provider(provider_name)
     url = normalize_tiktok_url(payload.url)
+    if not extract_tiktok_video_id(url):
+        raise HTTPException(status_code=400, detail="url must be a TikTok video URL in the form /video/<id>")
 
     existing = db.execute(select(Video).where(Video.url == url)).scalar_one_or_none()
     if existing is not None:

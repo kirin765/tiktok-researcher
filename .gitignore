@@ -9,3 +9,4 @@ __pycache__/
 data/
 .alembic_cache/
 .ruff_cache/
+.venv/

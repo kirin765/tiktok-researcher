@@ -18,6 +18,9 @@ class GenerateBriefRequest(BaseModel):
     language: str
     niche: str
     window_days: int = 7
+    analysis_level: int | None = None
+    active_video_target: int | None = None
+    analysis_min_final_score: float | None = None
 
 
 class ComputeScoresRequest(BaseModel):

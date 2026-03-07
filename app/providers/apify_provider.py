@@ -5,10 +5,13 @@ from datetime import datetime, timezone
 import random
 import threading
 import time
+import re
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy import select
 import requests
+from redis.exceptions import LockNotOwnedError
 
 from app.core.ids import extract_tiktok_video_id, normalize_tiktok_url
 from app.db.models import Video
@@ -20,6 +23,68 @@ class ApifyProvider(BaseProvider):
     name = "apify"
     _thread_gate: threading.BoundedSemaphore | None = None
     _thread_gate_limit: int = 1
+    _run_id_pattern = re.compile(r"run ID:\s*([A-Za-z0-9_-]+)", re.IGNORECASE)
+    _RUN_SYNC_TIMEOUT_CAP_SECONDS = 300
+    _metric_key_paths = {
+        "view_count": (
+            ("stats", "playCount"),
+            ("stats", "viewCount"),
+            ("stats", "play_count"),
+            ("stats", "view_count"),
+            ("playCount",),
+            ("viewCount",),
+            ("play_count",),
+            ("view_count",),
+            ("videoPlayCount",),
+            ("views",),
+            ("item", "stats", "playCount"),
+            ("item", "stats", "viewCount"),
+            ("item", "stats", "play_count"),
+            ("item", "playCount"),
+            ("item", "viewCount"),
+        ),
+        "like_count": (
+            ("stats", "diggCount"),
+            ("stats", "likeCount"),
+            ("stats", "like_count"),
+            ("diggCount",),
+            ("likeCount",),
+            ("like_count",),
+            ("item", "stats", "diggCount"),
+            ("item", "stats", "likeCount"),
+            ("item", "diggCount"),
+        ),
+        "comment_count": (
+            ("stats", "commentCount"),
+            ("stats", "comment_count"),
+            ("commentCount",),
+            ("comment_count",),
+            ("item", "stats", "commentCount"),
+            ("item", "commentCount"),
+        ),
+        "share_count": (
+            ("stats", "shareCount"),
+            ("stats", "share_count"),
+            ("shareCount",),
+            ("share_count",),
+            ("item", "stats", "shareCount"),
+            ("item", "shareCount"),
+        ),
+        "bookmark_count": (
+            ("stats", "collectCount"),
+            ("stats", "saveCount"),
+            ("stats", "bookmarkCount"),
+            ("stats", "bookmark_count"),
+            ("collectCount",),
+            ("saveCount",),
+            ("collect_count",),
+            ("bookmarkCount",),
+            ("bookmark_count",),
+            ("item", "stats", "collectCount"),
+            ("item", "stats", "saveCount"),
+            ("item", "collectCount"),
+        ),
+    }
 
     def discover_videos(
         self,
@@ -128,7 +193,10 @@ class ApifyProvider(BaseProvider):
             yield
         finally:
             if acquired is not None:
-                acquired.release()
+                try:
+                    acquired.release()
+                except LockNotOwnedError:
+                    pass
 
     @staticmethod
     def _clean_keyword(value: str) -> str:
@@ -147,6 +215,9 @@ class ApifyProvider(BaseProvider):
 
     def upsert_video_from_url(self, session, url: str, region: str | None, language: str | None) -> Video:
         normalized = normalize_tiktok_url(url)
+        platform_video_id = extract_tiktok_video_id(normalized)
+        if platform_video_id is None:
+            raise ValueError(f"invalid tiktok video URL: {url}")
         existing = session.execute(select(Video).where(Video.url == normalized)).scalar_one_or_none()
         if existing:
             if region and not existing.region:
@@ -154,13 +225,13 @@ class ApifyProvider(BaseProvider):
             if language and not existing.language:
                 existing.language = language
             if not existing.platform_video_id:
-                existing.platform_video_id = extract_tiktok_video_id(normalized)
+                existing.platform_video_id = platform_video_id
             return existing
 
         row = Video(
             platform="tiktok",
             url=normalized,
-            platform_video_id=extract_tiktok_video_id(normalized),
+            platform_video_id=platform_video_id,
             region=region,
             language=language,
             caption_keywords=[],
@@ -216,16 +287,28 @@ class ApifyProvider(BaseProvider):
                 raw={"provider": self.name, "actor_payload": []},
             )
 
-        stats = item.get("stats", {})
+        view_count = self._extract_metric(item, self._metric_key_paths["view_count"])
+        like_count = self._extract_metric(item, self._metric_key_paths["like_count"])
+        comment_count = self._extract_metric(item, self._metric_key_paths["comment_count"])
+        share_count = self._extract_metric(item, self._metric_key_paths["share_count"])
+        bookmark_count = self._extract_metric(item, self._metric_key_paths["bookmark_count"])
         raw = {"provider": self.name, "item": item}
+        if (
+            view_count is None
+            and like_count is None
+            and comment_count is None
+            and share_count is None
+            and bookmark_count is None
+        ):
+            raw["parse_warning"] = "missing_numeric_metrics"
         return MetricPayload(
             captured_at=now,
             source=self.name,
-            view_count=self._safe_int(stats.get("playCount") or item.get("viewCount") or item.get("views")),
-            like_count=self._safe_int(stats.get("diggCount") or item.get("likeCount")),
-            comment_count=self._safe_int(stats.get("commentCount")),
-            share_count=self._safe_int(stats.get("shareCount")),
-            bookmark_count=self._safe_int(stats.get("collectCount") or item.get("saveCount") or item.get("bookmarkCount")),
+            view_count=view_count,
+            like_count=like_count,
+            comment_count=comment_count,
+            share_count=share_count,
+            bookmark_count=bookmark_count,
             raw=raw,
         )
 
@@ -254,23 +337,28 @@ class ApifyProvider(BaseProvider):
 
         resolved_actor_id = actor_id or settings.apify_actor_id
         resolved_timeout = timeout if timeout is not None else settings.apify_actor_timeout
+        request_timeout = max(1, min(self._RUN_SYNC_TIMEOUT_CAP_SECONDS, resolved_timeout))
 
-        with self._apify_slot():
-            response = requests.post(
-                self._build_actor_url(resolved_actor_id, token),
-                json=self._sanitize_payload(payload),
-                timeout=resolved_timeout,
-            )
+        try:
+            with self._apify_slot():
+                response = requests.post(
+                    self._build_actor_url(resolved_actor_id, token, request_timeout=request_timeout),
+                    json=self._sanitize_payload(payload),
+                    timeout=resolved_timeout,
+                )
+        except requests.exceptions.Timeout as exc:
+            raise RuntimeError(f"Apify actor call timeout ({resolved_timeout}s): {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"Apify actor call failed: {exc}") from exc
         if not response.ok:
             try:
                 body = response.json()
             except Exception:
                 body = response.text
-            if isinstance(body, dict):
-                error = body.get("error") or body.get("message") or body
-            else:
-                error = body
-            raise RuntimeError(f"Apify actor call failed ({response.status_code}): {error}")
+            detail = self._format_apify_error(body, token)
+            raise RuntimeError(
+                f"Apify actor call failed ({response.status_code}) at {self._redact_apify_url(getattr(response, 'url', 'unknown'))}: {detail}"
+            )
         response.raise_for_status()
 
         payload = response.json()
@@ -321,16 +409,24 @@ class ApifyProvider(BaseProvider):
                     return url
         raw_id = item.get("id") or item.get("aweme_id")
         if raw_id is not None:
-            return f"https://www.tiktok.com/@fallback/video/{str(raw_id)}"
+            normalized_id = str(raw_id).strip()
+            if normalized_id.isdigit():
+                return f"https://www.tiktok.com/@apify/video/{normalized_id}"
         return None
 
     def _normalize_discovered_item(self, item: dict[str, Any]) -> dict[str, Any] | None:
         url = self._extract_video_url(item)
         if not url:
             return None
+        normalized_url = normalize_tiktok_url(url)
+        platform_video_id = self._safe_str(item.get("id") or item.get("aweme_id") or item.get("videoId"))
+        if platform_video_id is None:
+            platform_video_id = extract_tiktok_video_id(normalized_url)
+        if not platform_video_id or not platform_video_id.isdigit():
+            return None
         return {
-            "url": normalize_tiktok_url(url),
-            "platform_video_id": self._safe_str(item.get("id") or item.get("aweme_id") or item.get("videoId")),
+            "url": normalized_url,
+            "platform_video_id": platform_video_id,
             "published_at": self._safe_timestamp(item.get("createTime") or item.get("create_time") or item.get("publishedAt")),
             "duration_sec": self._safe_int(item.get("duration") or item.get("durationSec") or item.get("videoDuration")),
             "caption_keywords": self._safe_list(item.get("caption_keywords") or item.get("captionKeywords") or item.get("hashtags")),
@@ -346,8 +442,104 @@ class ApifyProvider(BaseProvider):
         }
 
     @staticmethod
-    def _build_actor_url(actor_id: str, token: str) -> str:
-        return f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items?token={token}"
+    def _normalize_actor_id(raw_actor_id: str) -> str:
+        if not raw_actor_id:
+            raise ValueError("APIFY actor id is required")
+        resolved_actor_id = raw_actor_id.strip()
+        if not resolved_actor_id:
+            raise ValueError("APIFY actor id is required")
+        if "/" in resolved_actor_id and "~" not in resolved_actor_id:
+            resolved_actor_id = "~".join(part for part in resolved_actor_id.split("/") if part)
+        if not resolved_actor_id:
+            raise ValueError("APIFY actor id is required")
+        return resolved_actor_id
+
+    @staticmethod
+    def _build_actor_url(actor_id: str, token: str, request_timeout: int | None = None) -> str:
+        resolved_actor_id = ApifyProvider._normalize_actor_id(actor_id)
+        resolved_actor_id = quote(resolved_actor_id, safe="~@")
+        url = f"https://api.apify.com/v2/acts/{resolved_actor_id}/run-sync-get-dataset-items?token={token}"
+        if request_timeout is not None:
+            url = f"{url}&timeout={max(1, int(request_timeout))}"
+        return url
+
+    @staticmethod
+    def _redact_apify_url(url: str) -> str:
+        if not isinstance(url, str):
+            return "unknown"
+        return re.sub(r"token=[^&]+", "token=***", url)
+
+    @classmethod
+    def _extract_run_id(cls, text: str) -> str | None:
+        match = cls._run_id_pattern.search(text)
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _extract_run_hint(token: str, run_id: str) -> str | None:
+        try:
+            response = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}?token={token}", timeout=8)
+        except Exception:
+            return None
+        if not response.ok:
+            return None
+        try:
+            payload = response.json()
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        status = payload.get("status")
+        status_message = payload.get("statusMessage")
+        exit_code = payload.get("exitCode")
+        parts: list[str] = []
+        if status:
+            parts.append(f"status={status}")
+        if exit_code is not None:
+            parts.append(f"exit_code={exit_code}")
+        if status_message:
+            parts.append(f"status_message={status_message}")
+        return ", ".join(parts) if parts else None
+
+    @classmethod
+    def _format_apify_error(cls, body: object, token: str | None = None) -> str:
+        if isinstance(body, dict):
+            detail = body.get("error")
+            if isinstance(detail, dict):
+                detail_type = detail.get("type")
+                detail_message = detail.get("message")
+                if detail_type and detail_message:
+                    error = f"{detail_type}: {detail_message}"
+                elif detail_type:
+                    error = str(detail_type)
+                elif detail_message:
+                    error = str(detail_message)
+                else:
+                    error = str(detail)
+            elif detail is not None:
+                error = str(detail)
+            elif body.get("type") and body.get("message"):
+                error = f'{body.get("type")}: {body.get("message")}'
+            elif body.get("type") is not None:
+                error = str(body.get("type"))
+            elif body.get("message") is not None:
+                error = str(body.get("message"))
+            else:
+                error = str(body)
+        elif isinstance(body, str):
+            error = body.strip() or "unknown"
+        else:
+            error = str(body)
+
+        if token:
+            run_id = cls._extract_run_id(error)
+            if run_id:
+                run_hint = cls._extract_run_hint(token, run_id)
+                if run_hint:
+                    error = f"{error} (run_hint: {run_hint})"
+        return error
 
     @staticmethod
     def _redis_connection():
@@ -367,7 +559,43 @@ class ApifyProvider(BaseProvider):
     def _pick_item(payload: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not payload:
             return None
+        for item in payload:
+            if ApifyProvider._item_has_metrics(item):
+                return item
         return payload[0]
+
+    @classmethod
+    def _item_has_metrics(cls, item: dict[str, Any]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        for paths in cls._metric_key_paths.values():
+            for path in paths:
+                raw = cls._extract_nested(item, path)
+                if raw is None:
+                    continue
+                if cls._safe_int(raw) is not None:
+                    return True
+        return False
+
+    @staticmethod
+    def _extract_nested(item: dict[str, Any], path: tuple[str, ...]) -> Any | None:
+        current: Any = item
+        for key in path:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+            if current is None:
+                return None
+        return current
+
+    @classmethod
+    def _extract_metric(cls, item: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> int | None:
+        for path in paths:
+            raw = cls._extract_nested(item, path)
+            parsed = cls._safe_int(raw)
+            if parsed is not None:
+                return parsed
+        return None
 
     @staticmethod
     def _as_dict_list(items: object) -> list[dict[str, Any]]:

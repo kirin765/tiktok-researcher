@@ -17,6 +17,17 @@ class Dummy:
         self.bookmark_count = 0
 
 
+class DummyNoSignal:
+    def __init__(self, captured_at):
+        self.video_id = 1
+        self.captured_at = captured_at
+        self.view_count = None
+        self.like_count = None
+        self.comment_count = None
+        self.share_count = None
+        self.bookmark_count = None
+
+
 def test_compute_scores_formula():
     t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
     t24 = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -35,3 +46,13 @@ def test_compute_scores_formula():
     assert score is not None
     assert score.snapshot_0h["view"] == 100
     assert score.snapshot_24h["view"] == 300
+
+
+def test_compute_scores_from_snapshots_rejects_no_metric_rows():
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    t24 = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    row0 = DummyNoSignal(t0)
+    row1 = DummyNoSignal(t24)
+
+    assert compute_score_from_snapshots([row0, row1]) is None

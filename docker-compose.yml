@@ -41,7 +41,7 @@ services:
     environment:
       PYTHONPATH: /app
       WORKER_SYNC: "false"
-    command: ["sh", "-c", "rq worker viral-factory -u redis://redis:6379/0 & rq worker viral-factory -u redis://redis:6379/0 & rq worker viral-factory -u redis://redis:6379/0 & wait"]
+    command: ["sh", "-c", "rq worker viral-factory -u redis://redis:6379/0 --worker-ttl ${RQ_WORKER_JOB_TIMEOUT:-600} & rq worker viral-factory -u redis://redis:6379/0 --worker-ttl ${RQ_WORKER_JOB_TIMEOUT:-600} & rq worker viral-factory -u redis://redis:6379/0 --worker-ttl ${RQ_WORKER_JOB_TIMEOUT:-600} & wait"]
     volumes:
       - ./data:/data
 

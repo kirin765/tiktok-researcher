@@ -88,3 +88,48 @@ def test_e2e_generate_brief_job_creates_db_and_export_file(client):
     export = client.get(f"/briefs/{brief_id}/export")
     assert export.status_code == 200
     assert export.headers["content-type"].startswith("application/json")
+
+
+def test_e2e_smoke_discover_import_snapshot_and_brief(client):
+    discover = client.post(
+        "/seeds/discover",
+        json={"provider": "apify", "query": "trend", "max_results": 1, "region": "KR", "language": "ko"},
+    )
+    assert discover.status_code == 200
+    discover_body = discover.json()
+    assert discover_body["mode"] == "sync"
+    assert discover_body["discovered"] >= 1
+
+    url = _random_url()
+    csv = (
+        "url,likeCount,commentCount,bookmarkCount,shareCount,capturedAt\n"
+        f"{url},10,2,0,3,2026-01-01T00:00:00Z\n"
+    )
+    import_res = client.post("/seeds/import-csv?provider=csv", files={"file": ("smoke.csv", io.BytesIO(csv.encode()), "text/csv")})
+    assert import_res.status_code == 200
+    assert import_res.json()["imported"] == 1
+    video_id = None
+
+    videos = client.get("/videos?limit=100").json()
+    for item in videos:
+        if item.get("url") == url:
+            video_id = item["id"]
+            break
+    assert video_id is not None
+
+    snapshot = client.post("/jobs/fetch-snapshot", json={"video_id": video_id, "provider": "csv"})
+    assert snapshot.status_code == 200
+    snapshot_job = client.get(f"/jobs/{snapshot.json()['job_id']}")
+    assert snapshot_job.status_code == 200
+    assert snapshot_job.json()["status"] == "done"
+
+    create = client.post("/jobs/generate-brief", json={"region": "KR", "language": "ko", "niche": "smoke", "window_days": 7})
+    assert create.status_code == 200
+    brief_job = client.get(f"/jobs/{create.json()['job_id']}")
+    assert brief_job.status_code == 200
+    assert brief_job.json()["status"] == "done"
+
+    briefs = client.get("/briefs?region=KR&language=ko&limit=5")
+    assert briefs.status_code == 200
+    assert isinstance(briefs.json(), list)
+    assert briefs.json()

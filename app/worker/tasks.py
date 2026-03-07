@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.analysis.content_features import build_content_tokens
+from app.core.ids import extract_tiktok_video_id, coerce_tiktok_video_url
 from app.core.brief_builder import build_brief_json
 from app.core.scoring import compute_scores_for_videos
 from app.core.storage import brief_filename, write_export
@@ -55,6 +57,10 @@ def _now() -> datetime:
 
 def _fmt_job_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _is_valid_tiktok_video_url(raw_url: str) -> bool:
+    return extract_tiktok_video_id(raw_url or "") is not None
 
 
 def _safe_parse_discovered_payload(raw: object) -> dict[str, Any] | None:
@@ -265,22 +271,53 @@ def _discover_videos(
     imported = 0
     skipped = 0
     scheduled = 0
+    skip_missing_url = 0
+    skip_invalid_url = 0
+    skip_missing_payload = 0
+    skip_other = 0
     imported_video_ids: list[str] = []
     for item in discovered:
         payload = _safe_parse_discovered_payload(item)
         if not payload:
             skipped += 1
+            skip_missing_payload += 1
             continue
         url = payload.get("url")
+        platform_video_id = payload.get("platform_video_id")
         if not isinstance(url, str) or not url.strip():
             skipped += 1
+            skip_missing_url += 1
+            continue
+        normalized_url = coerce_tiktok_video_url(url, str(platform_video_id) if platform_video_id is not None else None)
+        if not normalized_url:
+            skipped += 1
+            skip_invalid_url += 1
             continue
 
-        video = prov.upsert_video_from_url(db, url.strip(), region=region, language=language)
+        try:
+            video = prov.upsert_video_from_url(db, normalized_url, region=region, language=language)
+        except Exception:
+            skipped += 1
+            skip_other += 1
+            continue
         imported += 1
         imported_video_ids.append(str(video.id))
         _apply_discovered_metadata(video, payload)
         scheduled += schedule_snapshot_tasks(db, video)
+
+    if skip_missing_payload or skip_missing_url or skip_invalid_url or skip_other:
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "discovery import summary: discovered=%d, imported=%d, skipped=%d, skip_missing_payload=%d, skip_missing_url=%d, skip_invalid_url=%d, skip_other=%d, scheduled=%d",
+            discovered_count,
+            imported,
+            skipped,
+            skip_missing_payload,
+            skip_missing_url,
+            skip_invalid_url,
+            skip_other,
+            scheduled,
+        )
 
     return (discovered_count, imported, skipped, scheduled, imported_video_ids), next_cursor
 
@@ -342,9 +379,23 @@ def task_import_csv(db, batch_id: str, file_path: str) -> None:
     provider = CsvProvider()
     provider_data = provider.parse_csv(Path(file_path).read_bytes())
     scheduled_total = 0
+    skipped = 0
+    imported = 0
 
     for row in provider_data:
-        vid = provider.upsert_video_from_url(db, row.get("url", ""), row.get("region"), row.get("language"))
+        raw_url = (row.get("url") or "").strip()
+        if not raw_url:
+            skipped += 1
+            continue
+        normalized_url = coerce_tiktok_video_url(raw_url, row.get("platform_video_id"))
+        if not normalized_url:
+            skipped += 1
+            continue
+        try:
+            vid = provider.upsert_video_from_url(db, normalized_url, row.get("region"), row.get("language"))
+        except Exception:
+            skipped += 1
+            continue
         if vid is None:
             continue
         view_count = _to_int(row.get("viewCount"))
@@ -367,10 +418,22 @@ def task_import_csv(db, batch_id: str, file_path: str) -> None:
                 raw={"provider": "csv", "batch_id": batch_id},
             )
         scheduled_total += schedule_snapshot_tasks(db, vid)
+        imported += 1
+
+    if skipped:
+        logging.getLogger(__name__).warning(
+            "task_import_csv summary: batch_id=%s imported=%d skipped=%d scheduled_snapshots=%d",
+            batch_id,
+            imported,
+            skipped,
+            scheduled_total,
+        )
     return None
 
 
 def schedule_snapshot_tasks(db, video: Video) -> int:
+    if not _is_valid_tiktok_video_url(video.url):
+        return 0
     now = _now()
     offsets = [0, 3600, 21600, 86400, 259200]
     count = 0
@@ -419,10 +482,40 @@ def _get_scheduled_task(db, scheduled_task_id: str) -> ScheduledTask | None:
     return db.get(ScheduledTask, parsed)
 
 
+def _is_retriable_snapshot_error(error: str) -> bool:
+    normalized = (error or "").lower()
+    if "invalid tiktok video url" in normalized:
+        return False
+    if "apify actor call failed (400" in normalized:
+        if (
+            "timeout" in normalized
+            or "run-timeout-exceeded" in normalized
+            or "too many requests" in normalized
+            or "rate limit" in normalized
+        ):
+            return True
+        return False
+    if "apify actor call failed (404" in normalized:
+        return False
+    if "run-failed" in normalized:
+        return False
+    if "apify actor call failed (408" in normalized:
+        return True
+    if "apify actor call failed (502" in normalized:
+        return True
+    if "timeout" in normalized or "run-timeout-exceeded" in normalized:
+        return True
+    return True
+
+
 def _plan_next_retry(s: ScheduledTask, error: str) -> None:
     settings = get_settings()
     s.attempts += 1
     s.last_error = error
+    if not _is_retriable_snapshot_error(error):
+        s.status = "failed"
+        s.updated_at = _now()
+        return
     if s.attempts >= settings.max_snapshot_attempts:
         s.status = "failed"
         s.updated_at = _now()
@@ -523,6 +616,8 @@ def _fetch_metrics_snapshot_impl(
             vid = db.get(Video, video_uuid)
             if not vid:
                 raise RuntimeError("video not found")
+            if not _is_valid_tiktok_video_url(vid.url):
+                raise RuntimeError("invalid tiktok video URL: must be a TikTok video URL in the form /video/<id>")
 
             prov = _provider(provider_name)
             p = prov.fetch_metrics(db, vid, captured_at)
@@ -538,6 +633,28 @@ def _fetch_metrics_snapshot_impl(
                 bookmark_count=p.bookmark_count,
                 raw=p.raw,
             )
+            if (
+                p.view_count is None
+                and p.like_count is None
+                and p.comment_count is None
+                and p.share_count is None
+                and p.bookmark_count is None
+            ):
+                parse_warning = None
+                if isinstance(p.raw, dict):
+                    parse_warning = p.raw.get("parse_warning")
+                _log(
+                    db,
+                    job.id if job is not None else uuid.uuid4(),
+                    "warning",
+                    "snapshot fetch returned no numeric metrics",
+                    {
+                        "video_id": str(video_uuid),
+                        "provider": provider_name,
+                        "parse_warning": parse_warning,
+                        "scheduled_task_id": str(scheduled.id) if scheduled is not None else None,
+                    },
+                )
 
             if job is not None:
                 job.status = "done"
@@ -664,7 +781,16 @@ def task_compute_scores(window_days: int = 7, job_id: str | None = None) -> list
             raise
 
 
-def task_generate_brief(job_id: str, region: str, language: str, niche: str, window_days: int = 7) -> str | None:
+def task_generate_brief(
+    job_id: str,
+    region: str,
+    language: str,
+    niche: str,
+    window_days: int = 7,
+    analysis_level: int | None = None,
+    active_video_target: int | None = None,
+    analysis_min_final_score: float | None = None,
+) -> str | None:
     from datetime import date
 
     with get_db() as db:
@@ -681,10 +807,27 @@ def task_generate_brief(job_id: str, region: str, language: str, niche: str, win
             job.id,
             "info",
             "brief generation started",
-            {"region": region, "language": language, "niche": niche, "window_days": window_days},
+            {
+                "region": region,
+                "language": language,
+                "niche": niche,
+                "window_days": window_days,
+                "analysis_level": analysis_level,
+                "active_video_target": active_video_target,
+                "analysis_min_final_score": analysis_min_final_score,
+            },
         )
         try:
-            payload = build_brief_json(db, region=region, language=language, niche=niche, window_days=window_days)
+            payload = build_brief_json(
+                db,
+                region=region,
+                language=language,
+                niche=niche,
+                window_days=window_days,
+                analysis_level=analysis_level,
+                active_video_target=active_video_target,
+                analysis_min_final_score=analysis_min_final_score,
+            )
             window = payload["meta"]["window"]
             brief = CreativeBrief(
                 region=region,
@@ -697,7 +840,13 @@ def task_generate_brief(job_id: str, region: str, language: str, niche: str, win
             db.add(brief)
             db.flush()
             out = write_export(payload, brief_filename(brief.created_at, str(brief.id)))
-            _log(db, job.id, "info", "brief generated", {"brief_id": str(brief.id), "path": str(out), "region": region, "language": language})
+            _log(
+                db,
+                job.id,
+                "info",
+                "brief generated",
+                {"brief_id": str(brief.id), "path": str(out), "region": region, "language": language},
+            )
             job.status = "done"
             job.progress = 100
             return str(brief.id)
