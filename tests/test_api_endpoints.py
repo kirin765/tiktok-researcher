@@ -6,6 +6,7 @@ import uuid
 
 from app.db.models import CreativeBrief, ContentToken, Job, MetricSnapshot, Video
 from app.db.session import get_db
+from app.settings import get_settings
 
 
 def _video_url() -> str:
@@ -69,7 +70,7 @@ def test_seed_import_csv_returns_expected_schema(client):
     body = res.json()
     assert body["imported"] == 1
     assert body["skipped"] == 0
-    assert body["scheduled_snapshots"] == 5
+    assert body["scheduled_snapshots"] == len(get_settings().snapshot_schedule_offsets_seconds)
 
 
 def test_seed_discover_requires_query_like_condition(client):

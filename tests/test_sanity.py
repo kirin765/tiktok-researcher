@@ -11,6 +11,7 @@ from app.db.models import ScheduledTask, Video
 from app.db.session import get_db
 from app.providers.csv_provider import CsvProvider
 from app.worker import tasks
+from app.settings import get_settings
 
 
 def _url() -> str:
@@ -34,7 +35,7 @@ def test_duplicate_url_import_is_idempotent_with_fixed_schedule_base(monkeypatch
     first = client.post("/seeds/import-csv?provider=csv", files={"file": ("test.csv", first_csv.encode(), "text/csv")})
     assert first.status_code == 200
     assert first.json()["imported"] == 1
-    assert first.json()["scheduled_snapshots"] == 5
+    assert first.json()["scheduled_snapshots"] == len(get_settings().snapshot_schedule_offsets_seconds)
 
     second = client.post("/seeds/import-csv?provider=csv", files={"file": ("test.csv", second_csv.encode(), "text/csv")})
     assert second.status_code == 200
@@ -51,7 +52,7 @@ def test_duplicate_url_import_is_idempotent_with_fixed_schedule_base(monkeypatch
             .where(ScheduledTask.task_type == "metrics_snapshot")
             .order_by(ScheduledTask.due_at)
         ).scalars().all()
-        assert len(scheduled) == 5
+        assert len(scheduled) == len(get_settings().snapshot_schedule_offsets_seconds)
 
 
 def test_scheduler_snapshot_offsets_match_spec(monkeypatch):
@@ -64,7 +65,8 @@ def test_scheduler_snapshot_offsets_match_spec(monkeypatch):
         video = provider.upsert_video_from_url(db, normalize_tiktok_url(_url()), region="KR", language="ko")
         video_id = video.id
         count = tasks.schedule_snapshot_tasks(db, video)
-        assert count == 5
+        expected = len(get_settings().snapshot_schedule_offsets_seconds)
+        assert count == expected
         assert video_id is not None
 
     with get_db() as db:
@@ -86,7 +88,7 @@ def test_scheduler_snapshot_offsets_match_spec(monkeypatch):
                 target = target.replace(tzinfo=timezone.utc)
             deltas.append(int((target - base).total_seconds()))
         deltas = sorted(deltas)
-        assert deltas == [0, 3600, 21600, 86400, 259200]
+        assert deltas == sorted(get_settings().snapshot_schedule_offsets_seconds)
 
 
 def test_snapshot_retry_backoff_applies_exponential_and_cap(monkeypatch):

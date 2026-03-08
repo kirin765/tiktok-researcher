@@ -435,7 +435,10 @@ def schedule_snapshot_tasks(db, video: Video) -> int:
     if not _is_valid_tiktok_video_url(video.url):
         return 0
     now = _now()
-    offsets = [0, 3600, 21600, 86400, 259200]
+    settings = get_settings()
+    offsets = sorted(set(int(offset) for offset in settings.snapshot_schedule_offsets_seconds))
+    if 0 not in offsets:
+        offsets = [0, *offsets]
     count = 0
     for sec in offsets:
         due = now + timedelta(seconds=sec)

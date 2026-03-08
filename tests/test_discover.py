@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.settings import get_settings
+
 
 def test_discover_seed_sync(client):
     res = client.post(
@@ -13,7 +15,7 @@ def test_discover_seed_sync(client):
     assert body["discovered"] == 1
     assert body["imported"] == 1
     assert body["skipped"] == 0
-    assert body["scheduled_snapshots"] == 5
+    assert body["scheduled_snapshots"] == len(get_settings().snapshot_schedule_offsets_seconds)
     assert len(body["video_ids"]) == 1
     assert body["job_id"] is None
 

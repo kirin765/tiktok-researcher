@@ -31,6 +31,25 @@ def _to_float(raw: str | None, default: float) -> float:
         return default
 
 
+def _parse_int_list(raw: str | None, default: list[int]) -> list[int]:
+    if raw is None or not str(raw).strip():
+        return list(default)
+    values: list[int] = []
+    for part in str(raw).split(","):
+        value = part.strip()
+        if not value:
+            continue
+        try:
+            parsed = int(value)
+        except Exception:
+            continue
+        if parsed < 0:
+            continue
+        if parsed not in values:
+            values.append(parsed)
+    return values if values else list(default)
+
+
 class Settings:
     def __init__(self) -> None:
         self.database_url = os.getenv("DATABASE_URL", "sqlite:///./viral_factory.db")
@@ -104,6 +123,10 @@ class Settings:
         self.active_video_target = max(1, int(os.getenv("ACTIVE_VIDEO_TARGET", "200")))
         self.video_pool_target = max(1, int(os.getenv("VIDEO_POOL_TARGET", str(self.active_video_target))))
         self.analysis_min_final_score = _to_float(os.getenv("ANALYSIS_MIN_FINAL_SCORE"), -1000000.0)
+        self.snapshot_schedule_offsets_seconds = _parse_int_list(
+            os.getenv("SNAPSHOT_SCHEDULE_OFFSETS_SECONDS"),
+            [0, 86400, 259200],
+        )
 
         self.telegram_bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip() or None
         self.telegram_chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip() or None
